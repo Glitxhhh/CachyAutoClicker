@@ -1,0 +1,13 @@
+# CMake build directories
+/build/
+/.cmake/
+/CMakeUserPresets.json
+
+# Compiled binaries
+CachyAutoClicker
+
+# IDE specific files
+/.vscode/
+/.idea/
+*.swp
+*.user

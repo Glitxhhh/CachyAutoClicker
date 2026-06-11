@@ -1,4 +1,4 @@
-# Mouse Keyboard Clicker Holder v2.0
+# Cachy AutoClicker
 
 A native C++ Qt6 auto-clicker and key-holder utility designed specifically to bypass security restrictions on modern Wayland sessions (like CachyOS, Arch Linux, or Fedora) using the Linux kernel `uinput` architecture.
 

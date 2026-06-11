@@ -4,14 +4,13 @@ A native C++ Qt6 auto-clicker and key-holder utility designed specifically to by
 
 ![Icon](icon.png)
 
-## Features
-- **Wayland Compatible**: Bypasses display server boundaries by creating a hardware-level virtual input device.
-- **Global Toggle**: Uses raw `/dev/input` polling to handle an `F6` start/stop hotkey globally (even when minimized or in-game).
-- **Dual Mode Execution**: Supports repetitive firing (Autoclick) or sustained pressure (Hold).
-- **Responsive UI**: Custom lockable millisecond input frequency widget with active visual glowing states.
-- **Standalone Binary**: Zero external runtime scripting dependencies. Baked-in interface assets.
+---
 
-## Prerequisites
-On CachyOS / Arch Linux, install the compilation toolchain and Qt6 libraries:
+## ⚠️ CRITICAL: Permission Requirements (Read Before Running)
+
+Because this tool interacts directly with kernel-level device emulation (`/dev/uinput`) to generate clicks and monitors a global hotkey via `/dev/input/` events, **it will not work out-of-the-box without elevated hardware privileges.** If you just run the binary normally, it will launch, but the hotkey and clicking engine will be completely unresponsive. You have two options to run it:
+
+### Option 1: The Quick Way (Run via Sudo)
+The fastest way to get up and running is to execute the binary with root privileges from your terminal:
 ```bash
-sudo pacman -S base-devel cmake qt6-base
+sudo ./CachyAutoClicker

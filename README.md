@@ -25,7 +25,8 @@ Because this application interacts directly with kernel-level device emulation (
 
 1. Go to the **Releases** tab on the right side of this GitHub repository page.
 2. Download the compiled standalone `CachyAutoClicker` binary.
-3. Open a terminal where you downloaded the file and mark it as executable:
+3. Make sure the **Qt 6 runtime** is installed (on Arch/CachyOS: `sudo pacman -S qt6-base`; the binary is dynamically linked).
+4. Open a terminal where you downloaded the file and mark it as executable:
    ```bash
    chmod +x CachyAutoClicker
    ```

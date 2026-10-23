@@ -1,0 +1,68 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'LICENSE']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need tags to work out the next version
+
+      # Next version = latest vX.Y.Z tag with the patch bumped.
+      # Put [minor] or [major] in a commit message to bump those instead.
+      - name: Compute version
+        id: version
+        run: |
+          last=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          if [ -z "$last" ]; then
+            next=1.0.0
+          else
+            IFS=. read -r major minor patch <<< "${last#v}"
+            msg=$(git log -1 --pretty=%B)
+            if [[ "$msg" == *"[major]"* ]]; then major=$((major+1)); minor=0; patch=0
+            elif [[ "$msg" == *"[minor]"* ]]; then minor=$((minor+1)); patch=0
+            else patch=$((patch+1)); fi
+            next="$major.$minor.$patch"
+          fi
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "Building version $next"
+
+      # Qt6 Widgets/DBus/Network, plus the libX11 headers for the optional X11 hotkey support.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qt6-base-dev libx11-dev
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+          strip build/CachyAutoClicker
+          ls -l build/CachyAutoClicker
+          ldd build/CachyAutoClicker | grep -E "Qt6|libX11" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CachyAutoClicker
+          path: build/CachyAutoClicker
+
+      # The README tells people to download the plain "CachyAutoClicker" binary, so that's the asset name.
+      - name: Tag & release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="v${{ steps.version.outputs.version }}"
+          gh release create "$v" build/CachyAutoClicker \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$v" --generate-notes

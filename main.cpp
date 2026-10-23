@@ -521,7 +521,8 @@ private:
 
     QString statusText() const {
         return QString("<center><font color='%1'><b>Status: %2</b></font><br>Press <b>%3</b> globally to start or stop</center>")
-            .arg(is_running ? "#2ecc71" : "#e74c3c", is_running ? "RUNNING" : "STOPPED", hotkey_name);
+            .arg(is_running ? QStringLiteral("#2ecc71") : QStringLiteral("#e74c3c"),
+                 is_running ? QStringLiteral("RUNNING") : QStringLiteral("STOPPED"), hotkey_name);
     }
 
 private slots:

@@ -189,8 +189,10 @@ private:
                     shortcuts.value<QDBusArgument>() >> list;
                     if (!list.isEmpty()) trigger = list.first().properties.value("trigger_description").toString();
                 }
-                if (trigger.isEmpty())
-                    setStatus("Registered with your desktop, but no key is assigned. Set one in System Settings > Shortcuts > Cachy AutoClicker.");
+                if (trigger.isEmpty() && qEnvironmentVariable("XDG_CURRENT_DESKTOP").contains("Hyprland", Qt::CaseInsensitive))
+                    setStatus(QString("Registered with Hyprland. Add this line to hyprland.conf to assign a key:  bind = , F6, global, %1:toggle").arg(APP_ID));
+                else if (trigger.isEmpty())
+                    setStatus("Registered with your desktop, but no key is assigned. Set one in your desktop's shortcut settings (KDE: System Settings > Shortcuts > Cachy AutoClicker).");
                 else
                     setStatus(QString("Also bound through your desktop's global shortcuts: %1 (change it in System Settings > Shortcuts)").arg(trigger));
             });

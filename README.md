@@ -138,6 +138,15 @@ So the app also registers its hotkey with your desktop through the XDG GlobalSho
 - **Changing the key** in the app silently moves the desktop's binding too (KDE). On other desktops change it in the desktop's own shortcut settings.
 - The portal needs an app id, so the app writes a launcher entry, `~/.local/share/applications/org.glitxh.CachyAutoClicker.desktop` (and an icon in `~/.local/share/CachyAutoClicker/`). Delete them to remove it.
 
+| Session | Hotkey from a forwarded keyboard | Alt+Tab pause for a forwarded keyboard |
+| --- | --- | --- |
+| KDE Plasma (Wayland) | desktop portal (tested) | KDE's switcher signals (tested) |
+| X11 (GNOME, XFCE, Cinnamon, i3, KDE...) | X11 key grab (tested against a nested X server with XTest input, which is how Deskflow injects on X11) | X11 key state (tested the same way) |
+| GNOME / Hyprland (Wayland) | desktop portal (should work, **untested**; Hyprland needs one `bind = , F6, global, org.glitxh.CachyAutoClicker:toggle` line in `hyprland.conf`) | physical keyboards only |
+| Sway, niri | `--toggle` command below | not needed: they switch windows instantly |
+
+On X11 sessions the app grabs the key through X instead of using the portal. Building X11 support needs the libX11 headers (`libx11` on Arch/CachyOS); without them the app still builds and everything else works.
+
 Desktops without a GlobalShortcuts portal (Sway, niri) can instead bind a key in their own config to a command that talks to the running app:
 
 ```bash
@@ -147,6 +156,10 @@ CachyAutoClicker --status      # prints "running" or "stopped"; exit code 0 = ru
 ```
 
 When more than one path fires for the same key press (a physical keyboard is seen by both the `/dev/input` reader and the portal), toggles within about 0.8 seconds of each other count as one.
+
+### Alt+Tab
+
+While Alt is held the clicker stops sending input and releases anything it was holding, then waits about 0.4 seconds before resuming. Otherwise it would click or press keys through a window switcher, which on KDE doesn't change the focused window until you let go of Alt. Alt is read from the keyboards the app can see in `/dev/input`; on KDE it also listens for KWin's own window-switcher shortcut, and on X11 it asks the X server, so Alt+Tab from a Deskflow-forwarded keyboard is covered too.
 
 Building needs the Qt6 `Widgets`, `DBus` and `Network` modules (on Arch/CachyOS the `qt6-base` package has all three).
 

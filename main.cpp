@@ -15,10 +15,13 @@
 #include <QIcon>
 #include <QFile>
 #include <QElapsedTimer>
+#include <memory>
 #include <QSettings>
 
 #include "portal_shortcut.h"
 #include "command_channel.h"
+#include "switcher_watcher.h"
+#include "x11_keys.h"
 
 #include <iostream>
 #include <vector>
@@ -30,6 +33,7 @@
 #include <cstring>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 
 // Complete explicit map of Qt Keys to Linux Kernel Evdev Keycodes
 int qt_key_to_linux_keycode(int qt_key) {
@@ -203,6 +207,9 @@ public:
     std::atomic<int> hotkey_code{KEY_F6};
     bool running = true;
 
+    // True while Alt is held on a keyboard this can read (bit 0 = left Alt, bit 1 = right Alt).
+    bool altHeld() const { return alt_mask.load() != 0; }
+
 protected:
     void run() override {
         std::vector<int> fds;
@@ -225,6 +232,11 @@ protected:
                     if (pfds[i].revents & POLLIN) {
                         struct input_event ev;
                         while (read(pfds[i].fd, &ev, sizeof(ev)) > 0) {
+                            if (ev.type == EV_KEY && (ev.code == KEY_LEFTALT || ev.code == KEY_RIGHTALT)) {
+                                const int bit = ev.code == KEY_LEFTALT ? 1 : 2;
+                                if (ev.value == 1) alt_mask.fetch_or(bit);
+                                else if (ev.value == 0) alt_mask.fetch_and(~bit);
+                            }
                             if (ev.type == EV_KEY && ev.code == hotkey_code && ev.value == 1) {
                                 emit hotkeyPressed();
                             }
@@ -235,6 +247,9 @@ protected:
         }
         for (int fd : fds) close(fd);
     }
+
+private:
+    std::atomic<int> alt_mask{0};
 };
 
 // Autoclick / Hold Execution Driver Thread
@@ -245,6 +260,11 @@ public:
     int target_code;
     int interval_ms;
     bool running = true;
+
+    // Returns true while a window switch (Alt+Tab) is in progress. Input is held back for that time plus a short
+    // settle afterwards: a switcher like KDE's doesn't change the focused window until you let go of Alt, so
+    // clicking or pressing through it would act on the wrong window (or fight the switcher).
+    std::function<bool()> pause_requested;
 
     void stop() { running = false; }
 
@@ -273,13 +293,28 @@ protected:
         usleep(100000);
 
         if (mode == "Hold") {
-            send_event(fd, EV_KEY, target_code, 1);
-            send_event(fd, EV_SYN, SYN_REPORT, 0);
-            while (running) { usleep(10000); }
-            send_event(fd, EV_KEY, target_code, 0);
-            send_event(fd, EV_SYN, SYN_REPORT, 0);
+            bool held = false;
+            while (running) {
+                const bool paused = pausedNow();
+                if (!paused && !held) {
+                    send_event(fd, EV_KEY, target_code, 1);
+                    send_event(fd, EV_SYN, SYN_REPORT, 0);
+                    held = true;
+                } else if (paused && held) {
+                    // Never leave the key down while the user is switching windows; press it afresh afterwards.
+                    send_event(fd, EV_KEY, target_code, 0);
+                    send_event(fd, EV_SYN, SYN_REPORT, 0);
+                    held = false;
+                }
+                usleep(10000);
+            }
+            if (held) {
+                send_event(fd, EV_KEY, target_code, 0);
+                send_event(fd, EV_SYN, SYN_REPORT, 0);
+            }
         } else {
             while (running) {
+                if (pausedNow()) { usleep(10000); continue; }
                 send_event(fd, EV_KEY, target_code, 1);
                 send_event(fd, EV_SYN, SYN_REPORT, 0);
                 usleep(2000); // physical press cycle duration
@@ -296,6 +331,18 @@ protected:
     }
 
 private:
+    static constexpr int SETTLE_MS = 400;
+    std::chrono::steady_clock::time_point settle_until{};
+
+    bool pausedNow() {
+        const auto now = std::chrono::steady_clock::now();
+        if (pause_requested && pause_requested()) {
+            settle_until = now + std::chrono::milliseconds(SETTLE_MS);   // stay paused until the switch has landed
+            return true;
+        }
+        return now < settle_until;
+    }
+
     void send_event(int fd, int type, int code, int val) {
         struct input_event ie;
         std::memset(&ie, 0, sizeof(ie));
@@ -325,6 +372,8 @@ private:
     HotkeyWorker *hotkey_listener = nullptr;
     PortalShortcut *portal = nullptr;
     CommandServer *commands = nullptr;
+    KdeSwitcherWatcher *switcher = nullptr;
+    std::unique_ptr<X11Keys> x11;   // X11 sessions: hotkey grab + Alt state, which also see Deskflow's XTest input
     bool is_running = false;
 
     // The /dev/input hotkey, the desktop shortcut and a --toggle command can all fire for one key press (a physical
@@ -434,8 +483,27 @@ public:
             portal_label->setText(text);
             portal_label->setVisible(!text.isEmpty());
         });
-        portal->start(PortalShortcut::triggerFor(hotkey_selector->getQtKey()));
+
+        // X11 sessions: grab the key through X (sees XTest input from Deskflow & co). Wayland: the desktop portal.
+        const bool x11_session = qEnvironmentVariable("XDG_SESSION_TYPE").compare("x11", Qt::CaseInsensitive) == 0
+                                 && !qEnvironmentVariableIsEmpty("DISPLAY");
+        x11 = std::make_unique<X11Keys>();
+        if (x11_session && x11->start(hotkey_selector->getQtKey(), [this]() {
+                QMetaObject::invokeMethod(this, "toggleFromShortcut", Qt::QueuedConnection);
+            })) {
+            const QString text = QString::fromStdString(x11->status());
+            std::fprintf(stderr, "[x11] %s\n", text.toUtf8().constData());
+            portal_label->setText(text);
+            portal_label->setVisible(!text.isEmpty());
+        } else {
+            x11.reset();
+            portal->start(PortalShortcut::triggerFor(hotkey_selector->getQtKey()));
+        }
         connect(hotkey_selector, &KeySelectorButton::keyChanged, this, &MainWindow::onHotkeyChanged);
+
+        // KDE only: knows when Alt+Tab's switcher is open, even for a keyboard forwarded by Deskflow (which
+        // never shows its Alt key to the /dev/input reader).
+        switcher = new KdeSwitcherWatcher(this);
 
         // "CachyAutoClicker --toggle|--start|--stop|--status" from another process.
         commands = new CommandServer([this](const QString &command) {
@@ -464,7 +532,14 @@ private slots:
         hotkey_name = name;
         status_label->setText(statusText());
         QSettings("CachyAutoClicker", "CachyAutoClicker").setValue("hotkey_qt_key", qt_key);
-        portal->rebind(qt_key, name);
+        if (x11) {
+            x11->setHotkey(qt_key);
+            const QString text = QString::fromStdString(x11->status());
+            portal_label->setText(text);
+            portal_label->setVisible(!text.isEmpty());
+        } else {
+            portal->rebind(qt_key, name);
+        }
     }
 
     void updateDeviceUI() {
@@ -501,6 +576,9 @@ private slots:
             status_label->setText(statusText());
         } else {
             worker = new ClickerWorker();
+            worker->pause_requested = [this]() {
+                return hotkey_listener->altHeld() || switcher->active() || (x11 && x11->altHeld());
+            };
             worker->mode = btn_hold->isChecked() ? "Hold" : "Autoclick";
             worker->interval_ms = interval_input->text().toInt();
             if (worker->interval_ms <= 0) worker->interval_ms = 100; // Safe fallback validation

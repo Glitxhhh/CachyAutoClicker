@@ -14,6 +14,11 @@
 #include <QCloseEvent>
 #include <QIcon>
 #include <QFile>
+#include <QElapsedTimer>
+#include <QSettings>
+
+#include "portal_shortcut.h"
+#include "command_channel.h"
 
 #include <iostream>
 #include <vector>
@@ -24,6 +29,7 @@
 #include <linux/uinput.h>
 #include <cstring>
 #include <algorithm>
+#include <atomic>
 
 // Complete explicit map of Qt Keys to Linux Kernel Evdev Keycodes
 int qt_key_to_linux_keycode(int qt_key) {
@@ -51,6 +57,11 @@ int qt_key_to_linux_keycode(int qt_key) {
         case Qt::Key_F10: return KEY_F10; case Qt::Key_F11: return KEY_F11; case Qt::Key_F12: return KEY_F12;
         default: return KEY_E;
     }
+}
+
+// True when the Qt key has a real Linux keycode in the map above (the map falls back to E for everything else).
+static bool qt_key_is_mapped(int qt_key) {
+    return qt_key == Qt::Key_E || qt_key_to_linux_keycode(qt_key) != KEY_E;
 }
 
 // Special text field that handles locking focus and custom aesthetic states
@@ -99,11 +110,18 @@ class KeySelectorButton : public QPushButton {
     Q_OBJECT
 private:
     bool listening = false;
-    int current_linux_code = KEY_E;
-    QString current_key_name = "E";
+    int current_linux_code;
+    int current_qt_key;
+    QString current_key_name;
+    bool only_mapped_keys;
 
 public:
-    KeySelectorButton(QWidget *parent = nullptr) : QPushButton("E", parent) {
+    // only_mapped: ignore keys that have no known Linux keycode (used for the hotkey, where silently falling
+    // back to "E" would be wrong).
+    KeySelectorButton(QWidget *parent = nullptr, int qt_key = Qt::Key_E, bool only_mapped = false)
+        : QPushButton(QKeySequence(qt_key).toString(), parent),
+          current_linux_code(qt_key_to_linux_keycode(qt_key)), current_qt_key(qt_key),
+          current_key_name(QKeySequence(qt_key).toString()), only_mapped_keys(only_mapped) {
         setCheckable(true);
         setStyleSheet(
             "QPushButton {"
@@ -123,8 +141,21 @@ public:
     }
 
     int getLinuxCode() const { return current_linux_code; }
+    int getQtKey() const { return current_qt_key; }
+    QString getKeyName() const { return current_key_name; }
+
+signals:
+    void keyChanged(int qt_key, int linux_code, const QString &name);
 
 private:
+    void cancelListening() {
+        if (!listening) return;
+        listening = false;
+        releaseKeyboard();
+        setChecked(false);
+        setText(current_key_name);
+    }
+
     void startListening() {
         listening = true;
         setText("Press any key...");
@@ -132,23 +163,31 @@ private:
     }
 
 protected:
+    // Clicking away while it's waiting for a key cancels, instead of leaving the keyboard grabbed.
+    void focusOutEvent(QFocusEvent *event) override {
+        QPushButton::focusOutEvent(event);
+        cancelListening();
+    }
+
     void keyPressEvent(QKeyEvent *event) override {
         if (listening) {
+            int k = event->key();
+            if (k == Qt::Key_Escape || (only_mapped_keys && !qt_key_is_mapped(k))) {
+                cancelListening();
+                return;
+            }
+
             listening = false;
             releaseKeyboard();
             setChecked(false);
 
-            int k = event->key();
-            if (k == Qt::Key_Escape) {
-                setText(current_key_name);
-                return;
-            }
-
             current_linux_code = qt_key_to_linux_keycode(k);
+            current_qt_key = k;
             current_key_name = QKeySequence(k).toString();
             if (current_key_name.isEmpty()) current_key_name = QString("Key %1").arg(k);
-            
+
             setText(current_key_name);
+            emit keyChanged(k, current_linux_code, current_key_name);
         } else {
             QPushButton::keyPressEvent(event);
         }
@@ -161,7 +200,7 @@ class HotkeyWorker : public QThread {
 signals:
     void hotkeyPressed();
 public:
-    int hotkey_code = KEY_F6;
+    std::atomic<int> hotkey_code{KEY_F6};
     bool running = true;
 
 protected:
@@ -278,14 +317,29 @@ private:
     QLabel *interval_label;
     QLabel *status_label;
     
+    QLabel *portal_label;
+    KeySelectorButton *hotkey_selector;
+    QString hotkey_name = "F6";
+
     ClickerWorker *worker = nullptr;
     HotkeyWorker *hotkey_listener = nullptr;
+    PortalShortcut *portal = nullptr;
+    CommandServer *commands = nullptr;
     bool is_running = false;
+
+    // The /dev/input hotkey, the desktop shortcut and a --toggle command can all fire for one key press (a physical
+    // keyboard is seen by both the reader and the portal), so toggles this close together count as one.
+    static constexpr qint64 SHORTCUT_DEBOUNCE_MS = 800;
+    QElapsedTimer since_last_shortcut;
 
 public:
     MainWindow() {
         setWindowTitle("Key Clicker Holder");
-        resize(340, 360);
+        resize(340, 420);
+
+        // Clicking empty space gives the window focus, so a text box (or the key selector) lets go of it.
+        // Without this a QLineEdit keeps focus until another focusable widget is clicked.
+        setFocusPolicy(Qt::ClickFocus);
 
         // Apply dark baseline container style matching target image
         setStyleSheet("QWidget { background-color: #1e1e24; color: #ffffff; font-family: 'Segoe UI', sans-serif; }");
@@ -338,11 +392,26 @@ public:
         freq_layout->addWidget(interval_input);
         layout->addLayout(freq_layout);
 
+        // Toggle hotkey (saved between launches)
+        layout->addWidget(new QLabel("<b>Toggle hotkey</b>", this));
+        QSettings settings("CachyAutoClicker", "CachyAutoClicker");
+        int saved_hotkey = settings.value("hotkey_qt_key", int(Qt::Key_F6)).toInt();
+        if (!qt_key_is_mapped(saved_hotkey)) saved_hotkey = Qt::Key_F6;
+        hotkey_selector = new KeySelectorButton(this, saved_hotkey, true);
+        hotkey_name = hotkey_selector->getKeyName();
+        layout->addWidget(hotkey_selector);
+
         layout->addSpacerItem(new QSpacerItem(20, 20, QSizePolicy::Policy::Minimum, QSizePolicy::Policy::Expanding));
 
         // Global Status Indicator
-        status_label = new QLabel("<center><font color='#e74c3c'><b>Status: STOPPED</b></font><br>Press <b>F6</b> globally to start or stop</center>", this);
+        status_label = new QLabel(statusText(), this);
         layout->addWidget(status_label);
+
+        portal_label = new QLabel("", this);
+        portal_label->setWordWrap(true);
+        portal_label->setStyleSheet("QLabel { color: #8e92b5; font-size: 11px; }");
+        portal_label->hide();
+        layout->addWidget(portal_label);
 
         // Event Hookups
         connect(btn_mouse, &QRadioButton::toggled, this, &MainWindow::updateDeviceUI);
@@ -353,8 +422,28 @@ public:
 
         // Start global thread tracking
         hotkey_listener = new HotkeyWorker();
-        connect(hotkey_listener, &HotkeyWorker::hotkeyPressed, this, &MainWindow::toggleEngine);
+        hotkey_listener->hotkey_code = hotkey_selector->getLinuxCode();
+        connect(hotkey_listener, &HotkeyWorker::hotkeyPressed, this, &MainWindow::toggleFromShortcut);
         hotkey_listener->start();
+
+        // Also ask the desktop for the key: that path sees keys forwarded by Deskflow & co, which never reach /dev/input.
+        portal = new PortalShortcut(this);
+        connect(portal, &PortalShortcut::activated, this, &MainWindow::toggleFromShortcut);
+        connect(portal, &PortalShortcut::statusChanged, this, [this](const QString &text) {
+            std::fprintf(stderr, "[portal] %s\n", text.toUtf8().constData());
+            portal_label->setText(text);
+            portal_label->setVisible(!text.isEmpty());
+        });
+        portal->start(PortalShortcut::triggerFor(hotkey_selector->getQtKey()));
+        connect(hotkey_selector, &KeySelectorButton::keyChanged, this, &MainWindow::onHotkeyChanged);
+
+        // "CachyAutoClicker --toggle|--start|--stop|--status" from another process.
+        commands = new CommandServer([this](const QString &command) {
+            if (command == "toggle") toggleFromShortcut();
+            else if (command == "start" && !is_running) toggleEngine();
+            else if (command == "stop" && is_running) toggleEngine();
+            return QString(is_running ? "running" : "stopped");
+        }, this);
     }
 
 private:
@@ -362,7 +451,22 @@ private:
         setWindowIcon(QIcon(":/icon.png"));
     }
 
+    QString statusText() const {
+        return QString("<center><font color='%1'><b>Status: %2</b></font><br>Press <b>%3</b> globally to start or stop</center>")
+            .arg(is_running ? "#2ecc71" : "#e74c3c", is_running ? "RUNNING" : "STOPPED", hotkey_name);
+    }
+
 private slots:
+    // The user picked a new toggle key: use it for the /dev/input reader, remember it, and move the desktop's
+    // binding too (KDE; other desktops keep theirs and the status line says so).
+    void onHotkeyChanged(int qt_key, int linux_code, const QString &name) {
+        hotkey_listener->hotkey_code = linux_code;
+        hotkey_name = name;
+        status_label->setText(statusText());
+        QSettings("CachyAutoClicker", "CachyAutoClicker").setValue("hotkey_qt_key", qt_key);
+        portal->rebind(qt_key, name);
+    }
+
     void updateDeviceUI() {
         if (btn_mouse->isChecked()) {
             mouse_combo->show();
@@ -379,6 +483,12 @@ private slots:
         interval_label->setEnabled(checked);
     }
 
+    void toggleFromShortcut() {
+        if (since_last_shortcut.isValid() && since_last_shortcut.elapsed() < SHORTCUT_DEBOUNCE_MS) return;
+        since_last_shortcut.start();
+        toggleEngine();
+    }
+
     void toggleEngine() {
         if (is_running) {
             if (worker) {
@@ -388,7 +498,7 @@ private slots:
                 worker = nullptr;
             }
             is_running = false;
-            status_label->setText("<center><font color='#e74c3c'><b>Status: STOPPED</b></font><br>Press <b>F6</b> globally to start or stop</center>");
+            status_label->setText(statusText());
         } else {
             worker = new ClickerWorker();
             worker->mode = btn_hold->isChecked() ? "Hold" : "Autoclick";
@@ -405,7 +515,7 @@ private slots:
             }
 
             is_running = true;
-            status_label->setText("<center><font color='#2ecc71'><b>Status: RUNNING</b></font><br>Press <b>F6</b> globally to start or stop</center>");
+            status_label->setText(statusText());
             worker->start();
         }
     }
@@ -419,6 +529,12 @@ protected:
 };
 
 int main(int argc, char *argv[]) {
+    // "CachyAutoClicker --toggle" etc.: talk to the copy that's already running, then exit (no window).
+    if (argc == 2 && command_channel::isCommand(argv[1])) {
+        QCoreApplication client(argc, argv);
+        return command_channel::runClient(argv[1]);
+    }
+
     QApplication app(argc, argv);
     MainWindow window;
     window.show();

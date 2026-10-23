@@ -121,3 +121,32 @@ If the application launches but inputs or hotkeys do not work:
 ### 💡 Recommendation
 
 Use **Method A** for quick testing, but switch to **Method B** for daily use. It provides proper access control without elevating the entire application to root.
+
+---
+
+## 🎹 Toggle hotkey
+
+The toggle key defaults to **F6** and can be changed in the app: click the hotkey button, then press the key you want. The choice is remembered between launches.
+
+### Keyboards forwarded by Deskflow, Synergy or Input Leap
+
+On Wayland those tools inject your keys into the compositor (through libei), so they never show up as devices in `/dev/input`, which is where the hotkey is read from. A key typed on the forwarded keyboard reaches the focused window but not that reader.
+
+So the app also registers its hotkey with your desktop through the XDG GlobalShortcuts portal, which does see those keys (tested on KDE Plasma 6 with Deskflow):
+
+- **First launch:** your desktop shows a one-time confirmation dialog for the shortcut. Approve it and the toggle key works from any keyboard. It appears in **System Settings > Shortcuts** as "Cachy AutoClicker".
+- **Changing the key** in the app silently moves the desktop's binding too (KDE). On other desktops change it in the desktop's own shortcut settings.
+- The portal needs an app id, so the app writes a launcher entry, `~/.local/share/applications/org.glitxh.CachyAutoClicker.desktop` (and an icon in `~/.local/share/CachyAutoClicker/`). Delete them to remove it.
+
+Desktops without a GlobalShortcuts portal (Sway, niri) can instead bind a key in their own config to a command that talks to the running app:
+
+```bash
+CachyAutoClicker --toggle      # start if stopped, stop if running
+CachyAutoClicker --start       # --stop is the opposite
+CachyAutoClicker --status      # prints "running" or "stopped"; exit code 0 = running, 1 = stopped, 2 = app not running
+```
+
+When more than one path fires for the same key press (a physical keyboard is seen by both the `/dev/input` reader and the portal), toggles within about 0.8 seconds of each other count as one.
+
+Building needs the Qt6 `Widgets`, `DBus` and `Network` modules (on Arch/CachyOS the `qt6-base` package has all three).
+

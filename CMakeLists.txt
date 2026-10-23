@@ -8,8 +8,9 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON) # Enables Qt Resource Compilation
 
-find_package(Qt6 COMPONENTS Widgets REQUIRED)
+# DBus: the desktop-portal global hotkey. Network: the local socket behind --toggle/--status.
+find_package(Qt6 COMPONENTS Widgets DBus Network REQUIRED)
 
 # Included resources.qrc into the executable build
-add_executable(CachyAutoClicker main.cpp resources.qrc)
-target_link_libraries(CachyAutoClicker PRIVATE Qt6::Widgets)
+add_executable(CachyAutoClicker main.cpp portal_shortcut.h command_channel.h resources.qrc)
+target_link_libraries(CachyAutoClicker PRIVATE Qt6::Widgets Qt6::DBus Qt6::Network)

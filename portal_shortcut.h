@@ -10,6 +10,17 @@
 
 #include <functional>
 
+// The path this binary was started from. main() stores it once at startup: after an update replaces the file,
+// /proc/self/exe reads "... (deleted)", so asking the system again later would give the wrong answer.
+inline QString &appExePath() {
+    static QString path;
+    return path;
+}
+
+inline QString currentExePath() {
+    return appExePath().isEmpty() ? QCoreApplication::applicationFilePath() : appExePath();
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // Global hotkey through the XDG desktop portal (org.freedesktop.portal.GlobalShortcuts).
 //
@@ -58,10 +69,21 @@ public slots:
     }
 };
 
+// What writing the launcher entry did, for telling the user.
+struct LauncherResult {
+    QString path;
+    QString previous_exec;   // what an existing entry used to launch; empty when there wasn't one
+    bool existed = false;
+    bool changed = false;
+};
+
 class PortalShortcut : public QObject {
     Q_OBJECT
 public:
     static constexpr const char *APP_ID = "org.glitxh.CachyAutoClicker";
+
+    // Writes (or refreshes) the app launcher / search entry, replacing an older one. The portal needs the same file.
+    static LauncherResult installLauncherEntry() { return installDesktopEntry(); }
 
     explicit PortalShortcut(QObject *parent = nullptr) : QObject(parent) {
         qDBusRegisterMetaType<PortalShortcutInfo>();
@@ -230,18 +252,20 @@ private:
 
     // The portal only accepts app ids that have a matching .desktop file, so write one for the current user
     // (no root needed). It also gives the app a launcher entry and the name the desktop shows in its dialog.
-    static void installDesktopEntry() {
+    static LauncherResult installDesktopEntry() {
         const QString data_home = qEnvironmentVariable("XDG_DATA_HOME", QDir::homePath() + "/.local/share");
         const QString icon_dir = data_home + "/CachyAutoClicker";
         const QString icon_path = icon_dir + "/icon.png";
         QDir().mkpath(icon_dir);
-        if (!QFile::exists(icon_path) && QFile::copy(":/icon.png", icon_path))
+        // Always refreshed, so an updated app doesn't keep an old icon.
+        QFile::remove(icon_path);
+        if (QFile::copy(":/icon.png", icon_path))
             QFile::setPermissions(icon_path, QFileDevice::ReadOwner | QFileDevice::WriteOwner |
                                                  QFileDevice::ReadGroup | QFileDevice::ReadOther);
 
         // Exec key: wrap in quotes and escape the characters the desktop entry spec treats specially.
         QString exec = "\"";
-        const QString exe = QCoreApplication::applicationFilePath();
+        const QString exe = currentExePath();
         for (const QChar c : exe) {
             if (c == '"' || c == '`' || c == '$' || c == '\\') exec += '\\';
             if (c == '%') exec += '%';
@@ -254,6 +278,7 @@ private:
             "Type=Application\n"
             "Name=Cachy AutoClicker\n"
             "Comment=Auto-clicker and key holder\n"
+            "Keywords=clicker;autoclicker;hold;hotkey;uinput;\n"
             "Exec=" + exec + "\n"
             "Icon=" + icon_path + "\n"
             "Terminal=false\n"
@@ -262,8 +287,24 @@ private:
         const QString apps = data_home + "/applications";
         QDir().mkpath(apps);
         QFile file(apps + "/" + QString(APP_ID) + ".desktop");
-        if (file.open(QIODevice::ReadOnly) && file.readAll() == content.toUtf8()) return;   // already current
-        file.close();
-        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) file.write(content.toUtf8());   // rewritten when the app moves
+
+        LauncherResult result;
+        result.path = file.fileName();
+        if (file.open(QIODevice::ReadOnly)) {
+            const QByteArray existing = file.readAll();
+            file.close();
+            result.existed = true;
+            for (const QByteArray &line : existing.split('\n')) {
+                if (line.startsWith("Exec=")) {
+                    result.previous_exec = QString::fromUtf8(line.mid(5)).trimmed();
+                    if (result.previous_exec.startsWith('"')) result.previous_exec = result.previous_exec.mid(1);
+                    if (result.previous_exec.endsWith('"')) result.previous_exec.chop(1);
+                }
+            }
+            if (existing == content.toUtf8()) return result;   // already current
+        }
+        result.changed = true;
+        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) file.write(content.toUtf8());   // rewritten when the app moves or updates
+        return result;
     }
 };

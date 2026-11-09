@@ -15,6 +15,12 @@
 #include <QIcon>
 #include <QFile>
 #include <QElapsedTimer>
+#include <QDateTime>
+#include <QFileInfo>
+#include <QCheckBox>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QProcess>
 #include <memory>
 #include <QSettings>
 
@@ -22,6 +28,7 @@
 #include "command_channel.h"
 #include "switcher_watcher.h"
 #include "x11_keys.h"
+#include "app_update.h"
 
 #include <iostream>
 #include <vector>
@@ -365,6 +372,19 @@ private:
     QLabel *status_label;
     
     QLabel *portal_label;
+
+    // App card: launcher entry and updates
+    AppUpdater *updater = nullptr;
+    UpdateInfo pending_update;
+    bool update_installing = false;
+    QLabel *update_label;
+    QPushButton *update_button;
+    QPushButton *release_notes_button;
+    QLabel *version_label;
+    QPushButton *launcher_button;
+    QPushButton *check_button;
+    QCheckBox *auto_check_box;
+    QLabel *app_message;
     KeySelectorButton *hotkey_selector;
     QString hotkey_name = "F6";
 
@@ -384,7 +404,7 @@ private:
 public:
     MainWindow() {
         setWindowTitle("Key Clicker Holder");
-        resize(340, 420);
+        resize(340, 600);
 
         // Clicking empty space gives the window focus, so a text box (or the key selector) lets go of it.
         // Without this a QLineEdit keeps focus until another focusable widget is clicked.
@@ -394,6 +414,21 @@ public:
         setStyleSheet("QWidget { background-color: #1e1e24; color: #ffffff; font-family: 'Segoe UI', sans-serif; }");
 
         QVBoxLayout *layout = new QVBoxLayout(this);
+
+        // A newer GitHub release exists (hidden until a check finds one)
+        update_label = new QLabel("", this);
+        update_label->setWordWrap(true);
+        update_label->setStyleSheet("QLabel { color: #4ade80; font-weight: bold; padding: 6px; border: 1px solid #4ade80; border-radius: 4px; }");
+        update_label->hide();
+        update_button = new QPushButton("Update now", this);
+        release_notes_button = new QPushButton("Release notes", this);
+        update_button->hide();
+        release_notes_button->hide();
+        layout->addWidget(update_label);
+        QHBoxLayout *update_buttons = new QHBoxLayout();
+        update_buttons->addWidget(update_button);
+        update_buttons->addWidget(release_notes_button);
+        layout->addLayout(update_buttons);
 
         // Action Group
         layout->addWidget(new QLabel("<b>Action</b>", this));
@@ -462,6 +497,26 @@ public:
         portal_label->hide();
         layout->addWidget(portal_label);
 
+        // The app itself: launcher entry and updates
+        layout->addWidget(new QLabel("<b>App</b>", this));
+        version_label = new QLabel(QString("Version %1").arg(AppUpdater::currentVersionText()), this);
+        version_label->setStyleSheet("QLabel { color: #8e92b5; font-size: 11px; }");
+        layout->addWidget(version_label);
+        QHBoxLayout *app_buttons = new QHBoxLayout();
+        launcher_button = new QPushButton("Add to app launcher", this);
+        check_button = new QPushButton("Check for updates", this);
+        app_buttons->addWidget(launcher_button);
+        app_buttons->addWidget(check_button);
+        layout->addLayout(app_buttons);
+        auto_check_box = new QCheckBox("Check for updates when the app starts", this);
+        auto_check_box->setChecked(settings.value("check_updates", true).toBool());
+        layout->addWidget(auto_check_box);
+        app_message = new QLabel("", this);
+        app_message->setWordWrap(true);
+        app_message->setStyleSheet("QLabel { color: #8e92b5; font-size: 11px; }");
+        app_message->hide();
+        layout->addWidget(app_message);
+
         // Event Hookups
         connect(btn_mouse, &QRadioButton::toggled, this, &MainWindow::updateDeviceUI);
         connect(btn_autoclick, &QRadioButton::toggled, this, &MainWindow::updateActionUI);
@@ -505,6 +560,31 @@ public:
         // never shows its Alt key to the /dev/input reader).
         switcher = new KdeSwitcherWatcher(this);
 
+        // Updates and the launcher entry
+        updater = new AppUpdater(this);
+        connect(updater, &AppUpdater::checkFinished, this, &MainWindow::onCheckFinished);
+        connect(updater, &AppUpdater::progress, this, [this](int percent) {
+            update_label->setText(QString("Downloading %1... %2%").arg(pending_update.tag).arg(percent));
+        });
+        connect(updater, &AppUpdater::installFinished, this, &MainWindow::onInstallFinished);
+        connect(update_button, &QPushButton::clicked, this, &MainWindow::installUpdate);
+        connect(release_notes_button, &QPushButton::clicked, this, [this]() {
+            QDesktopServices::openUrl(QUrl(pending_update.release_url.isEmpty() ? AppUpdater::releasesPage() : pending_update.release_url));
+        });
+        connect(check_button, &QPushButton::clicked, this, [this]() { updater->check(true); showAppMessage("Checking for updates...", false); });
+        connect(launcher_button, &QPushButton::clicked, this, &MainWindow::addToLauncher);
+        connect(auto_check_box, &QCheckBox::toggled, this, [](bool on) {
+            QSettings("CachyAutoClicker", "CachyAutoClicker").setValue("check_updates", on);
+        });
+
+        // Quietly look for a newer release (at most every few hours), unless turned off.
+        {
+            QSettings prefs("CachyAutoClicker", "CachyAutoClicker");
+            const qint64 last = prefs.value("last_update_check", 0).toLongLong();
+            if (auto_check_box->isChecked() && QDateTime::currentSecsSinceEpoch() - last > 6 * 3600)
+                updater->check(false);
+        }
+
         // "CachyAutoClicker --toggle|--start|--stop|--status" from another process.
         commands = new CommandServer([this](const QString &command) {
             if (command == "toggle") toggleFromShortcut();
@@ -526,6 +606,76 @@ private:
     }
 
 private slots:
+    void showAppMessage(const QString &text, bool good) {
+        app_message->setStyleSheet(QString("QLabel { color: %1; font-size: 11px; }").arg(good ? "#4ade80" : "#8e92b5"));
+        app_message->setText(text);
+        app_message->show();
+    }
+
+    void addToLauncher() {
+        const LauncherResult r = PortalShortcut::installLauncherEntry();
+        // Some desktops only notice a new .desktop file after this; harmless if the tool isn't installed.
+        QProcess::execute("update-desktop-database", {QFileInfo(r.path).absolutePath()});
+
+        QString text;
+        if (!r.existed)
+            text = QString("Added to your app launcher (%1). It can take a moment to show up in search.").arg(r.path);
+        else if (r.changed && r.previous_exec != currentExePath())
+            text = QString("Replaced the old launcher entry (it pointed at %1).").arg(r.previous_exec);
+        else
+            text = "The launcher entry was already there; it's refreshed.";
+        showAppMessage(text, true);
+    }
+
+    void onCheckFinished(bool manual, bool update_available, const UpdateInfo &info, const QString &latest_tag, const QString &error) {
+        Q_UNUSED(latest_tag);
+        QSettings("CachyAutoClicker", "CachyAutoClicker").setValue("last_update_check", QDateTime::currentSecsSinceEpoch());
+
+        if (!error.isEmpty()) {
+            if (manual) showAppMessage(QString("Couldn't check for updates: %1").arg(error), false);   // a failed startup check stays silent
+            return;
+        }
+        if (update_available) {
+            pending_update = info;
+            update_label->setText(QString("%1 is out (you have v%2).").arg(info.tag, AppUpdater::currentVersionText()));
+            update_label->show();
+            update_button->setEnabled(true);
+            update_button->show();
+            release_notes_button->show();
+            if (manual) showAppMessage(QString("%1 is available - see the green box at the top.").arg(info.tag), true);
+        } else if (manual) {
+            showAppMessage(QString("You're up to date (v%1).").arg(AppUpdater::currentVersionText()), true);
+        }
+    }
+
+    void installUpdate() {
+        if (update_installing) return;
+        update_installing = true;
+
+        // Nothing should be pressed or clicking while the app swaps itself out.
+        if (is_running) toggleEngine();
+
+        update_button->setEnabled(false);
+        check_button->setEnabled(false);
+        update_label->setText(QString("Downloading %1...").arg(pending_update.tag));
+        updater->install(pending_update);
+    }
+
+    void onInstallFinished(bool ok, const QString &message) {
+        if (!ok) {
+            update_label->setText(QString("Couldn't update: %1").arg(message));
+            update_button->setEnabled(true);
+            check_button->setEnabled(true);
+            update_installing = false;
+            return;
+        }
+
+        update_label->setText("Updated. Restarting...");
+        // The new copy waits for this one to exit before it starts up.
+        QProcess::startDetached(currentExePath(), {"--wait-for", QString::number(QCoreApplication::applicationPid())});
+        QCoreApplication::quit();
+    }
+
     // The user picked a new toggle key: use it for the /dev/input reader, remember it, and move the desktop's
     // binding too (KDE; other desktops keep theirs and the status line says so).
     void onHotkeyChanged(int qt_key, int linux_code, const QString &name) {
@@ -614,7 +764,15 @@ int main(int argc, char *argv[]) {
         return command_channel::runClient(argv[1]);
     }
 
+    // Started by an update: let the old copy finish exiting first.
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (std::strcmp(argv[i], "--wait-for") == 0) AppUpdater::waitForExit(std::atol(argv[i + 1]));
+    }
+
     QApplication app(argc, argv);
+    appExePath() = QCoreApplication::applicationFilePath();   // before anything can replace the file
+    AppUpdater::cleanupAfterUpdate();
+
     MainWindow window;
     window.show();
     return app.exec();

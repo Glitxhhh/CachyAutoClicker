@@ -46,7 +46,7 @@ jobs:
 
       - name: Build
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCAC_VERSION=${{ steps.version.outputs.version }}
           cmake --build build --parallel
           strip build/CachyAutoClicker
           ls -l build/CachyAutoClicker

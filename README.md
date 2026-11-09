@@ -158,6 +158,15 @@ CachyAutoClicker --status      # prints "running" or "stopped"; exit code 0 = ru
 
 When more than one path fires for the same key press (a physical keyboard is seen by both the `/dev/input` reader and the portal), toggles within about 0.8 seconds of each other count as one.
 
+### Launcher entry and updates
+
+The **App** section at the bottom of the window has:
+
+- **Add to app launcher**: puts the app in your launcher and search by writing `~/.local/share/applications/org.glitxh.CachyAutoClicker.desktop` (the same entry the global hotkey needs). Click it again after moving or updating the app and it replaces the old entry and refreshes the icon.
+- **Check for updates**, and a checkbox to check automatically when the app starts (at most every 6 hours). When a newer GitHub release exists a green box appears with **Update now**: it downloads the new binary, checks its size, the SHA-256 GitHub reports for it and that it's a real Linux executable, replaces the running binary and restarts.
+
+Releases aren't code-signed, so updating trusts whatever this repository publishes on GitHub (over HTTPS). If the binary sits somewhere you can't write to, the update says so and you can download the release yourself.
+
 ### Alt+Tab
 
 While Alt is held the clicker stops sending input and releases anything it was holding, then waits about 0.4 seconds before resuming. Otherwise it would click or press keys through a window switcher, which on KDE doesn't change the focused window until you let go of Alt. Alt is read from the keyboards the app can see in `/dev/input`; on KDE it also listens for KWin's own window-switcher shortcut, and on X11 it asks the X server, so Alt+Tab from a Deskflow-forwarded keyboard is covered too.
